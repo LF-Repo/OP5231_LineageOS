@@ -1,0 +1,115 @@
+name: Build LineageOS 20 for OP5231
+
+on:
+  workflow_dispatch:
+
+env:
+  DEVICE_CODENAME: OP5231
+  LINEAGE_BRANCH: lineage-20.0
+  CCACHE_SIZE: 20G
+  MANIFEST_URL: https://github.com/LineageOS/android.git
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 360
+
+    steps:
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache curl flex g++-multilib gcc-multilib \
+            git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+            lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev \
+            libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools \
+            xsltproc zip zlib1g-dev python3 python-is-python3
+
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+
+
+      - name: Setup ccache
+        run: |
+          mkdir -p ~/.cache/ccache
+          echo "CCACHE_DIR=~/.cache/ccache" >> $GITHUB_ENV
+          echo "CCACHE_EXEC=$(which ccache)" >> $GITHUB_ENV
+          ccache -M ${{ env.CCACHE_SIZE }}
+
+
+      - name: Cache repo & ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/ccache
+            ~/.repo-cache
+          key: ${{ runner.os }}-repo-ccache-${{ env.LINEAGE_BRANCH }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-repo-ccache-${{ env.LINEAGE_BRANCH }}-
+
+
+      - name: Install repo
+        run: |
+          mkdir -p ~/bin
+          curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+
+      - name: Init source tree
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/lineage
+          cd $GITHUB_WORKSPACE/lineage
+          repo init -u ${{ env.MANIFEST_URL }} -b ${{ env.LINEAGE_BRANCH }} --depth=1
+
+
+      - name: Add local manifests
+        run: |
+          cd $GITHUB_WORKSPACE/lineage
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/roomservice.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <project name="Asgore-Dreemur/android_device_oppo_OP5231" path="device/oppo/OP5231" remote="github" revision="main" clone-depth="1" />
+            <project name="Asgore-Dreemur/kernel_oppo_mt6833" path="kernel/oppo/OP5231" remote="github" revision="main" clone-depth="1" />
+            <project name="Asgore-Dreemur/proprietary_vendor_oppo_OP5231" path="vendor/oppo/OP5231" remote="github" revision="main" clone-depth="1" />
+          </manifest>
+          EOF
+
+
+      - name: Sync source
+        run: |
+          cd $GITHUB_WORKSPACE/lineage
+
+          repo sync -c --no-clone-bundle --no-tags --prune -j$(nproc) device/oppo/OP5231 kernel/oppo/OP5231 vendor/oppo/OP5231
+          repo sync -c --no-clone-bundle --no-tags --prune -j$(nproc) --force-sync
+
+
+      - name: Build ROM
+        run: |
+          cd $GITHUB_WORKSPACE/lineage
+          source build/envsetup.sh
+          breakfast ${{ env.DEVICE_CODENAME }}
+          if [ $? -ne 0 ]; then
+            echo "Breakfast failed - check device dependencies"
+            exit 1
+          fi
+          brunch ${{ env.DEVICE_CODENAME }}
+        env:
+          USE_CCACHE: 1
+          BUILD_NUMBER: $(date +%Y%m%d)-github
+
+
+      - name: Upload artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lineage-20.0-${{ env.DEVICE_CODENAME }}-${{ github.run_number }}
+          path: |
+            ${{ github.workspace }}/lineage/out/target/product/${{ env.DEVICE_CODENAME }}/lineage-*.zip
+            ${{ github.workspace }}/lineage/out/target/product/${{ env.DEVICE_CODENAME }}/recovery.img
+          retention-days: 7
